@@ -2,19 +2,21 @@
 
 declare(strict_types=1);
 
+use JsonStreamingParser\Listener\GeoJsonListener;
+use JsonStreamingParser\Parser;
+use Psl\File;
+
 require_once __DIR__.'/../vendor/autoload.php';
 
-$testfile = __DIR__.'/../tests/data/example.geojson';
+$filename = __DIR__.'/../tests/data/example.geojson';
 
-$listener = new \JsonStreamingParser\Listener\GeoJsonListener(function ($item): void {
+$listener = new GeoJsonListener(static function ($item): void {
     var_dump($item);
 });
-$stream = fopen($testfile, 'r');
+$file = File\open_read_only($filename);
 try {
-    $parser = new \JsonStreamingParser\Parser($stream, $listener);
+    $parser = new Parser($file, $listener);
     $parser->parse();
-    fclose($stream);
-} catch (Exception $e) {
-    fclose($stream);
-    throw $e;
+} finally {
+    $file->close();
 }

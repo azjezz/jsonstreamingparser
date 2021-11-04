@@ -15,15 +15,9 @@ class InMemoryListener extends IdleListener
 {
     protected $result;
 
-    /**
-     * @var array
-     */
-    protected $stack;
+    protected array $stack;
 
-    /**
-     * @var string[]
-     */
-    protected $keys;
+    protected array $keys;
 
     public function getJson()
     {

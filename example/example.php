@@ -2,19 +2,23 @@
 
 declare(strict_types=1);
 
-require_once __DIR__.'/../vendor/autoload.php';
+use JsonStreamingParser\Listener\InMemoryListener;
+use JsonStreamingParser\Parser;
+use Psl\File;
 
-$testfile = __DIR__.'/../tests/data/example.json';
+require_once __DIR__ . '/../vendor/autoload.php';
 
-$listener = new \JsonStreamingParser\Listener\InMemoryListener();
-$stream = fopen($testfile, 'r');
+$listener = new InMemoryListener();
+
+$handle = File\open_read_only(__DIR__ . '/../tests/data/example.json');
+$lock = $handle->lock(File\LockType::SHARED);
+
 try {
-    $parser = new \JsonStreamingParser\Parser($stream, $listener);
+    $parser = new Parser($handle, $listener);
     $parser->parse();
-    fclose($stream);
-} catch (Exception $e) {
-    fclose($stream);
-    throw $e;
+} finally {
+    $lock->release();
+    $handle->close();
 }
 
-var_dump($listener->getJson());
+print_r($listener->getJson());

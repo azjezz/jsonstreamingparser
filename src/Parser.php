@@ -4,159 +4,108 @@ declare(strict_types=1);
 
 namespace JsonStreamingParser;
 
+use Psl\IO;
+
 use JsonStreamingParser\Exception\ParsingException;
 use JsonStreamingParser\Listener\ListenerInterface;
 use JsonStreamingParser\Listener\ParserAwareInterface;
 use JsonStreamingParser\Listener\PositionAwareInterface;
 
+use function chr;
+use function count;
+use function strlen;
+
 class Parser
 {
-    const STATE_START_DOCUMENT = 0;
-    const STATE_END_DOCUMENT = 14;
-    const STATE_DONE = -1;
-    const STATE_IN_ARRAY = 1;
-    const STATE_IN_OBJECT = 2;
-    const STATE_END_KEY = 3;
-    const STATE_AFTER_KEY = 4;
-    const STATE_IN_STRING = 5;
-    const STATE_START_ESCAPE = 6;
-    const STATE_UNICODE = 7;
-    const STATE_IN_NUMBER = 8;
-    const STATE_IN_TRUE = 9;
-    const STATE_IN_FALSE = 10;
-    const STATE_IN_NULL = 11;
-    const STATE_AFTER_VALUE = 12;
-    const STATE_UNICODE_SURROGATE = 13;
+    public const STATE_START_DOCUMENT = 0;
+    public const STATE_END_DOCUMENT = 14;
+    public const STATE_DONE = -1;
+    public const STATE_IN_ARRAY = 1;
+    public const STATE_IN_OBJECT = 2;
+    public const STATE_END_KEY = 3;
+    public const STATE_AFTER_KEY = 4;
+    public const STATE_IN_STRING = 5;
+    public const STATE_START_ESCAPE = 6;
+    public const STATE_UNICODE = 7;
+    public const STATE_IN_NUMBER = 8;
+    public const STATE_IN_TRUE = 9;
+    public const STATE_IN_FALSE = 10;
+    public const STATE_IN_NULL = 11;
+    public const STATE_AFTER_VALUE = 12;
+    public const STATE_UNICODE_SURROGATE = 13;
 
-    const STACK_OBJECT = 0;
-    const STACK_ARRAY = 1;
-    const STACK_KEY = 2;
-    const STACK_STRING = 3;
+    public const STACK_OBJECT = 0;
+    public const STACK_ARRAY = 1;
+    public const STACK_KEY = 2;
+    public const STACK_STRING = 3;
 
-    const UTF8_BOM = 1;
-    const UTF16_BOM = 2;
-    const UTF32_BOM = 3;
+    public const UTF8_BOM = 1;
+    public const UTF16_BOM = 2;
+    public const UTF32_BOM = 3;
 
     /**
      * @var int
      */
-    private $state;
+    private int $state;
 
     /**
      * @var int[]
      */
-    private $stack = [];
+    private array $stack = [];
 
-    /**
-     * @var resource
-     */
-    private $stream;
+    private ListenerInterface $listener;
 
-    /**
-     * @var ListenerInterface
-     */
-    private $listener;
+    private bool $emitWhitespace;
 
-    /**
-     * @var bool
-     */
-    private $emitWhitespace;
+    private string $buffer = '';
 
-    /**
-     * @var string
-     */
-    private $buffer = '';
+    private array $unicodeBuffer = [];
 
-    /**
-     * @var int
-     */
-    private $bufferSize;
+    private int $unicodeHighSurrogate = -1;
 
-    /**
-     * @var string[]
-     */
-    private $unicodeBuffer = [];
+    private string $unicodeEscapeBuffer = '';
 
-    /**
-     * @var int
-     */
-    private $unicodeHighSurrogate = -1;
+    private int $lineNumber;
 
-    /**
-     * @var string
-     */
-    private $unicodeEscapeBuffer = '';
+    private int $charNumber;
 
-    /**
-     * @var string
-     */
-    private $lineEnding;
+    private bool $stopParsing = false;
 
-    /**
-     * @var int
-     */
-    private $lineNumber;
+    private int $utfBom = 0;
 
-    /**
-     * @var int
-     */
-    private $charNumber;
-
-    /**
-     * @var bool
-     */
-    private $stopParsing = false;
-
-    /**
-     * @var int
-     */
-    private $utfBom = 0;
-
-    /**
-     * @param resource $stream
-     */
     public function __construct(
-        $stream,
+        private IO\ReadHandleInterface $handle,
         ListenerInterface $listener,
-        string $lineEnding = "\n",
         bool $emitWhitespace = false,
-        int $bufferSize = 8192
     ) {
-        if (!\is_resource($stream) || 'stream' !== get_resource_type($stream)) {
-            throw new \InvalidArgumentException('Invalid stream provided');
-        }
-
         $this->listener = $listener;
         if ($this->listener instanceof ParserAwareInterface) {
             $this->listener->setParser($this);
         }
 
-        $this->stream = $stream;
         $this->emitWhitespace = $emitWhitespace;
         $this->state = self::STATE_START_DOCUMENT;
-        $this->bufferSize = $bufferSize;
-        $this->lineEnding = $lineEnding;
     }
 
+    /**
+     * @throws \JsonStreamingParser\Exception\ParsingException
+     */
     public function parse(): void
     {
         $this->lineNumber = 1;
         $this->charNumber = 1;
-        $eof = false;
 
-        while (!feof($this->stream) && !$eof) {
-            $pos = ftell($this->stream);
-            $line = stream_get_line($this->stream, $this->bufferSize, $this->lineEnding);
-
-            if (false === $line) {
+        $reader = new IO\Reader($this->handle);
+        while (!$reader->isEndOfFile()) {
+            $line = $reader->readLine();
+            if (null === $line) {
                 $line = '';
+                $ended = true;
+            } else {
+                $ended = false;
             }
 
-            $ended = (bool) (ftell($this->stream) - \strlen($line) - $pos);
-            // if we're still at the same place after stream_get_line, we're done
-            $eof = ftell($this->stream) === $pos;
-
-            $byteLen = \strlen($line);
+            $byteLen = strlen($line);
             for ($i = 0; $i < $byteLen; $i++) {
                 if ($this->listener instanceof PositionAwareInterface) {
                     $this->listener->setFilePosition($this->lineNumber, $this->charNumber);
@@ -181,6 +130,9 @@ class Parser
         $this->stopParsing = true;
     }
 
+    /**
+     * @throws \JsonStreamingParser\Exception\ParsingException
+     */
     private function consumeChar(string $char): void
     {
         // see https://en.wikipedia.org/wiki/Byte_order_mark
@@ -295,7 +247,7 @@ class Parser
                 if (ctype_digit($char)) {
                     $this->buffer .= $char;
                 } elseif ('.' === $char) {
-                    if (false !== strpos($this->buffer, '.')) {
+                    if (str_contains($this->buffer, '.')) {
                         $this->throwParseError('Cannot have multiple decimal points in a number.');
                     } elseif (false !== stripos($this->buffer, 'e')) {
                         $this->throwParseError('Cannot have a decimal point in an exponent.');
@@ -321,21 +273,21 @@ class Parser
 
             case self::STATE_IN_TRUE:
                 $this->buffer .= $char;
-                if (4 === \strlen($this->buffer)) {
+                if (4 === strlen($this->buffer)) {
                     $this->endTrue();
                 }
                 break;
 
             case self::STATE_IN_FALSE:
                 $this->buffer .= $char;
-                if (5 === \strlen($this->buffer)) {
+                if (5 === strlen($this->buffer)) {
                     $this->endFalse();
                 }
                 break;
 
             case self::STATE_IN_NULL:
                 $this->buffer .= $char;
-                if (4 === \strlen($this->buffer)) {
+                if (4 === strlen($this->buffer)) {
                     $this->endNull();
                 }
                 break;
@@ -372,19 +324,19 @@ class Parser
     private function checkAndSkipUtfBom(string $c): bool
     {
         if (1 === $this->charNumber) {
-            if ($c === \chr(239)) {
+            if ($c === chr(239)) {
                 $this->utfBom = self::UTF8_BOM;
-            } elseif ($c === \chr(254) || $c === \chr(255)) {
+            } elseif ($c === chr(254) || $c === chr(255)) {
                 // NOTE: could also be UTF32_BOM
                 // second character will tell
                 $this->utfBom = self::UTF16_BOM;
-            } elseif ($c === \chr(0)) {
+            } elseif ($c === chr(0)) {
                 $this->utfBom = self::UTF32_BOM;
             }
         }
 
         if (self::UTF16_BOM === $this->utfBom && 2 === $this->charNumber &&
-              $c === \chr(254)) {
+              $c === chr(254)) {
             $this->utfBom = self::UTF32_BOM;
         }
 
@@ -436,6 +388,9 @@ class Parser
         $this->stack[] = self::STACK_ARRAY;
     }
 
+    /**
+     * @throws \JsonStreamingParser\Exception\ParsingException
+     */
     private function endArray(): void
     {
         $popped = array_pop($this->stack);
@@ -457,6 +412,9 @@ class Parser
         $this->stack[] = self::STACK_OBJECT;
     }
 
+    /**
+     * @throws \JsonStreamingParser\Exception\ParsingException
+     */
     private function endObject(): void
     {
         $popped = array_pop($this->stack);
@@ -483,6 +441,9 @@ class Parser
         $this->state = self::STATE_IN_STRING;
     }
 
+    /**
+     * @throws \JsonStreamingParser\Exception\ParsingException
+     */
     private function endString(): void
     {
         $popped = array_pop($this->stack);
@@ -542,7 +503,7 @@ class Parser
             );
         }
         $this->unicodeBuffer[] = $char;
-        if (4 === \count($this->unicodeBuffer)) {
+        if (4 === count($this->unicodeBuffer)) {
             $codepoint = hexdec(implode('', $this->unicodeBuffer));
 
             if ($codepoint >= 0xD800 && $codepoint < 0xDC00) {
@@ -556,16 +517,17 @@ class Parser
                 $combinedCodepoint = (($this->unicodeHighSurrogate - 0xD800) * 0x400) + ($codepoint - 0xDC00) + 0x10000;
 
                 $this->endUnicodeCharacter($combinedCodepoint);
+            } else if (-1 !== $this->unicodeHighSurrogate) {
+                $this->throwParseError('Invalid low surrogate following Unicode high surrogate.');
             } else {
-                if (-1 !== $this->unicodeHighSurrogate) {
-                    $this->throwParseError('Invalid low surrogate following Unicode high surrogate.');
-                } else {
-                    $this->endUnicodeCharacter($codepoint);
-                }
+                $this->endUnicodeCharacter($codepoint);
             }
         }
     }
 
+    /**
+     * @throws \JsonStreamingParser\Exception\ParsingException
+     */
     private function endUnicodeSurrogateInterstitial(): void
     {
         $unicodeEscape = $this->unicodeEscapeBuffer;
@@ -597,21 +559,33 @@ class Parser
         $this->state = self::STATE_AFTER_VALUE;
     }
 
+    /**
+     * @throws \JsonStreamingParser\Exception\ParsingException
+     */
     private function endTrue(): void
     {
         $this->endSpecialValue(true, 'true');
     }
 
+    /**
+     * @throws \JsonStreamingParser\Exception\ParsingException
+     */
     private function endFalse(): void
     {
         $this->endSpecialValue(false, 'false');
     }
 
+    /**
+     * @throws \JsonStreamingParser\Exception\ParsingException
+     */
     private function endNull(): void
     {
         $this->endSpecialValue(null, 'null');
     }
 
+    /**
+     * @throws \JsonStreamingParser\Exception\ParsingException
+     */
     private function endSpecialValue($value, string $stringValue): void
     {
         if ($this->buffer === $stringValue) {

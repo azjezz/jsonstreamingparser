@@ -2,22 +2,25 @@
 
 declare(strict_types=1);
 
-require_once __DIR__.'/../vendor/autoload.php';
+use JsonStreamingParser\Listener\CorruptedJsonListener;
+use JsonStreamingParser\Parser;
+use Psl\File;
 
-$testfile = __DIR__.'/../tests/data/example.geojson';
+require_once __DIR__ . '/../vendor/autoload.php';
 
-$listener = new \JsonStreamingParser\Listener\CorruptedJsonListener();
-$stream = fopen($testfile, 'r');
+$listener = new CorruptedJsonListener();
+
+$handle = File\open_read_only(__DIR__ . '/../tests/data/example.geojson');
+$lock = $handle->lock(File\LockType::SHARED);
+
 try {
-    $parser = new \JsonStreamingParser\Parser($stream, $listener);
+    $parser = new Parser($handle, $listener);
     $parser->parse();
-    fclose($stream);
-} catch (\Exception $e) {
-    fclose($stream);
-    throw $e;
+} finally {
+    $lock->release();
+    $handle->close();
 }
+
 $listener->forceEndDocument();
 //get repaired json
-$repairedJson = $listener->getJson();
-
-print_r($repairedJson);
+print_r($listener->getJson());
